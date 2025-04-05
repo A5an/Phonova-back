@@ -7,22 +7,19 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=whatsapp_db
-      - DB_USER=postgres
-      - DB_PASSWORD=your_password
-    depends_on:
-      - postgres
+      - PORT=3000
+      - N8N_URL=http://n8n:5678
+      - DATABASE_URL=${DATABASE_URL}
     volumes:
       - ./sessions:/app/sessions
-
+    networks:
+      - app-network
   n8n:
     image: n8nio/n8n
     ports:
       - "5678:5678"
     environment:
-      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_HOST=${N8N_HOST:-n8n}
       - N8N_PORT=5678
       - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
       - N8N_USER_MANAGEMENT_DISABLED=true
@@ -36,20 +33,12 @@ services:
       - N8N_SMTP_SENDER=your_email@gmail.com
     volumes:
       - n8n_data:/home/node/.n8n
-    depends_on:
-      - postgres
+    networks:
+      - app-network
 
-  postgres:
-    image: postgres:14-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_DB=whatsapp_db
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=your_password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+networks:
+  app-network:
+    driver: bridge
 
 volumes:
-  postgres_data:
   n8n_data:

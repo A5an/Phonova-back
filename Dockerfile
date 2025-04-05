@@ -20,7 +20,7 @@ RUN npm run build
 # 3001 Stage
 # 3002 Sockets
 # 3003 Whatsapp Service
-EXPOSE 3002
+EXPOSE 3000
 
 # Step 7: Define the command to run the app
 CMD ["node", "--max-old-space-size=10240", "dist/index.js"]
