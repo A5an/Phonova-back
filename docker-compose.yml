@@ -8,7 +8,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - N8N_URL=http://n8n:5678
+      - N8N_URL=https://n8n.phonova.ai
       - DATABASE_URL=${DATABASE_URL}
     volumes:
       - ./sessions:/app/sessions
@@ -19,9 +19,10 @@ services:
     ports:
       - "5678:5678"
     environment:
-      - N8N_HOST=${N8N_HOST:-n8n}
+      - N8N_HOST=n8n.phonova.ai
       - N8N_PORT=5678
-      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - N8N_PROTOCOL=https
+      - N8N_URL=https://n8n.phonova.ai
       - N8N_USER_MANAGEMENT_DISABLED=true
       - N8N_DIAGNOSTICS_ENABLED=false
       - N8N_HIRING_BANNER_ENABLED=false
