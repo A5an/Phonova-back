@@ -15,7 +15,7 @@ services:
     networks:
       - app-network
   n8n:
-    image: n8nio/n8n
+    image: n8nio/n8n:1.78.1
     ports:
       - "5678:5678"
     environment:
@@ -23,6 +23,8 @@ services:
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
       - N8N_URL=https://n8n.phonova.ai
+      - WEBHOOK_URL=https://n8n.phonova.ai
+      - VUE_APP_URL_BASE_API=https://n8n.phonova.ai
       - N8N_USER_MANAGEMENT_DISABLED=true
       - N8N_DIAGNOSTICS_ENABLED=false
       - N8N_HIRING_BANNER_ENABLED=false
