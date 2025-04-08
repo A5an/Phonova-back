@@ -8,7 +8,7 @@ import { handleSocketEvents } from "./socketsHandler"
 import { RootRouter } from "./router"
 import { whatsapp } from "./whatsapp/whatsapp.methods"
 
-const PORT = process.env.PORT || 3001
+const PORT = process.env.PORT || 3000
 
 const app = express()
 export const socketBot = ioClient(process.env.BASE_URL!)

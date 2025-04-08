@@ -1,24 +1,45 @@
+import mime from "mime-types";
 import { Pool } from "pg";
+
+import NodeCache from "node-cache";
 import {
   makeWASocket,
   DisconnectReason,
   makeCacheableSignalKeyStore,
   isJidBroadcast,
   fetchLatestBaileysVersion,
-} from "@whiskeysockets/baileys";
-import Boom from "@hapi/boom";
-import { socketBot } from "..";
+} from "baileys";
+import fetch from "node-fetch"; // Add this import
+import { Boom } from "@hapi/boom";
+import { File } from "formdata-node";
 import logger from "./utils/logs";
 import { usePostgreSQLAuthState } from "postgres-baileys";
 import { getPostgreSQLConfigFromEnv } from "./utils/createConfig";
-import { sleep } from "./utils/helpers";
-import QRCode from 'qrcode';
+import { cleanOldIds } from "../util/cleanIds";
+import { c } from "formdata-node/lib/File-cfd9c54a";
 
 const postgreSQLConfig = getPostgreSQLConfigFromEnv();
 
 const pool = new Pool(postgreSQLConfig);
 
+const messageIds = new Map();
+
+setInterval(() => {
+  cleanOldIds(messageIds);
+}, 60 * 60 * 1000); // each hour
+
 const whatsappInstances = new Map();
+const msgRetryCounterCache = new NodeCache();
+
+async function decryptWhatsAppMedia(buffer: Buffer, mimeType: string) {
+  const cleanedMimeType = mimeType.split(";")[0].trim();
+  const extension = mime.extension(cleanedMimeType);
+
+  // Создаем файл с использованием formdata-node
+  const file = new File([buffer], `file.${extension}`, { type: mimeType });
+
+  return file;
+}
 
 async function getInstanceInfo(instanceKey: string) {
   try {
@@ -53,20 +74,23 @@ const imitateTyping = async (botId: string, chatId: string) => {
 
 const startSock = async (botId: string) => {
   const { state, saveCreds, deleteSession } = await usePostgreSQLAuthState(
-    postgreSQLConfig,
+    pool,
     botId
   );
   const { version } = await fetchLatestBaileysVersion();
+  let lastMessageId: string | null = null;
 
   const sock = makeWASocket({
     version,
     logger,
-    browser: ["Phonova", "Chrome", "4.0.0"],
+    browser: ["Pleep", "Chrome", "4.0.0"],
     auth: {
+      //@ts-ignore
       creds: state.creds,
       /** caching makes the store faster to send/recv messages */
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
+    msgRetryCounterCache,
     generateHighQualityLinkPreview: true,
     // ignore all broadcast messages -- to receive the same
     // comment the line below out
@@ -90,48 +114,54 @@ const startSock = async (botId: string) => {
 
         if (connection === "close") {
           console.log(
-            (lastDisconnect?.error as any)?.output,
-            `botId: ${botId}`
+            (lastDisconnect?.error as Boom)?.output,
+            `assistantId: ${botId}`
           );
 
-          if ((lastDisconnect?.error as any)?.output?.statusCode === 440) {
+          whatsappInstances.delete(botId);
+
+          if ((lastDisconnect?.error as Boom)?.output?.statusCode === 440) {
             console.log(
-              `Connection closed, status: connectionReplaced (440), botId: ${botId}`
+              `Connection closed, status: connectionReplaced (440), assistantId: ${botId}`
             );
             return;
           }
 
-          if ((lastDisconnect?.error as any)?.output?.statusCode === 403) {
+          if ((lastDisconnect?.error as Boom)?.output?.statusCode === 403) {
             console.log(
-              `Connection closed, status: forbidden (403) (possibly ban), botId: ${botId}`
+              `Connection closed, status: forbidden (403) (possibly ban), assistantId: ${botId}`
             );
             return;
           }
 
           // reconnect if not logged out
           if (
-            (lastDisconnect?.error as any)?.output?.statusCode !==
+            (lastDisconnect?.error as Boom)?.output?.statusCode !==
             DisconnectReason.loggedOut
           ) {
+            if (
+              (lastDisconnect?.error as Boom)?.output?.statusCode !==
+                DisconnectReason.restartRequired ||
+              (lastDisconnect?.error as Boom)?.output?.statusCode !==
+                DisconnectReason.connectionReplaced
+            ) {
+              setTimeout(() => {
+                if (!whatsappInstances.get(botId)) {
+                  console.log(
+                    `Restarting instance, assistantId: ${botId}`
+                  );
+                }
+              }, 60000);
+            }
             startSock(botId);
           } else {
             console.log("Connection closed. You are logged out.");
             try {
               // Удаляем данные сессии из БД
               await deleteSession();
-              //await deleteAuthKey(botId);
               whatsappInstances.delete(botId);
-              const deleteBotDate = await fetch(`${process.env.N8N_URL}/webhook-test/deleteBot`, {
-                method: "POST",
-                body: JSON.stringify({ botId }),
-              });
-
-              if (deleteBotDate.ok) {
-                console.log("Bot deleted");
-              } else {
-                console.log("Bot not deleted");
-              }
-
+              // Удаляем whatsappBot и whatsappExtensions
+              deleteAfterLogout(botId);
             } catch (error) {
               console.error(
                 "Error while deleting auth key or local session data:",
@@ -150,17 +180,22 @@ const startSock = async (botId: string) => {
             instance_key: botId,
           };
 
-          const saveBotDate = await fetch(`${process.env.N8N_URL}/webhook-test/addBot`, {
-            method: "POST",
-            body: JSON.stringify(data),
-          });
+          try {
+            const saveBotDate = await fetch(`${process.env.N8N_URL}/webhook/addBot`, {
+              method: "POST",
+              body: JSON.stringify(data),
+            });
 
-          if (saveBotDate.ok) {
-            console.log("Bot saved");
-          } else {
-            console.log("Bot not saved");
+            if (saveBotDate.ok) {
+              console.log("Bot saved");
+            } else {
+              console.log("Bot not saved");
+            }
+
+          } catch (e) {
+            console.log(e);
           }
-        
+          console.log("Bot connected", sock.user);
         }
 
         if (qr) {
@@ -184,86 +219,6 @@ const startSock = async (botId: string) => {
         await saveCreds();
       }
 
-      // received a new message
-      // if (events["messages.upsert"]) {
-      //   const m = events["messages.upsert"];
-
-      //   console.log(m.type);
-      //   console.log("MESSAGE LIST: ", m.messages);
-
-      //   for (const msg of m.messages) {
-      //     //temporary solution
-      //     if (
-      //       msg.messageStubParameters &&
-      //       msg.messageStubParameters[0] === "Message absent from node"
-      //     ) {
-      //       msg.message = {};
-      //       msg.message.conversation = "Начни диалог";
-      //     }
-
-      //     if (!msg.message) return;
-
-      //     const messageType = Object.keys(msg.message)[0];
-      //     if (
-      //       ["protocolMessage", "senderKeyDistributionMessage"].includes(
-      //         messageType
-      //       )
-      //     ) {
-      //       console.log(JSON.stringify(msg.message));
-      //       return;
-      //     }
-
-      //     if (msg?.message?.reactionMessage) return;
-
-      //     console.log(msg);
-      //     const receivedMessageId: string = msg.key.id as string;
-      //     const chatId: string = msg.key.remoteJid as string;
-      //     const quotedMessage =
-      //       msg.message.extendedTextMessage?.contextInfo?.quotedMessage
-      //         ?.conversation;
-
-      //     const originalText: string =
-      //       msg?.message?.conversation ||
-      //       (msg?.message?.extendedTextMessage?.text as string) ||
-      //       (msg?.message?.imageMessage?.caption as string) ||
-			// 			(msg?.message?.documentMessage?.caption as string) ||
-			// 			(msg?.message?.documentWithCaptionMessage?.message?.documentMessage?.caption as string) ||
-      //       (msg?.message?.ephemeralMessage?.message?.conversation as string);
-
-      //     const text = quotedMessage
-      //       ? `[Reply to message: "${quotedMessage}"]\n${originalText}`
-      //       : originalText;
-
-      //     console.log(`Text: ${text}`);
-      //     const username: string = msg.pushName || "Неизвестный";
-      //     const number = chatId.split("@")[0];
-
-      //     if (lastMessageId === receivedMessageId) return;
-      //     lastMessageId = receivedMessageId;
-
-      //     if (
-      //       sock.user &&
-      //       !chatId.includes("@g.us") &&
-      //       !chatId.includes("@broadcast")
-      //     ) {
-      //       const userId: string = sock.user.id.replace(/:\d+@/, "@");
-
-      //       if (!msg.key.fromMe) {
-      //         const messageData = {
-      //           message: msg,
-      //           chatId,
-      //           botId: userId,
-      //           receivedMessageId,
-      //           username,
-      //           number,
-      //           instanceKey: botId,
-      //         };
-
-      //         // whatsapp.enqueueMessage(text, messageData);
-      //       } 
-      //     }
-      //   }
-      // }
     }
   );
 
@@ -279,7 +234,6 @@ async function restartAllSessions() {
     client.release(); // Закрываем соединение
 
     const sessions = res.rows;
-    console.log("Сессии:", sessions);
 
     for (const s of sessions) {
       // Используем for...of для последовательной обработки
@@ -294,7 +248,7 @@ async function restartAllSessions() {
         whatsappInstances.set(id, instance);
       }
 
-      await sleep(3000);
+      //await sleep(1000);
     }
   } catch (err) {
     console.error("Ошибка при выполнении запроса", err);
@@ -340,25 +294,67 @@ async function addBot(req, res) {
   }
 }
 
-async function deleteBot(req, res) {
-  const assistantId = req.body.assistantId;
+async function deleteAfterLogout(instanceKey: string) {
+  try {
+    console.log(`Deleting WhatsApp bot after logout: ${instanceKey}`);
+    
+    const data = {
+      botId: instanceKey,
+    };
 
-  if (!assistantId) {
-    return res.status(400).json({ error: "assistantId is required." });
+    const saveBotDate = await fetch(`${process.env.N8N_URL}/webhook/deleteBot`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+
+    if (saveBotDate.ok) {
+      console.log("Bot saved");
+    } else {
+      console.log("Bot not saved");
+    }
+    
+    console.log(`WhatsApp bot ${instanceKey} successfully deleted after logout`);
+  } catch (e) {
+    console.error(`Error during deleteAfterLogout for ${instanceKey}:`, e);
+  }
+}
+
+async function deleteBot(req, res) {
+  const botId = req.body.botId;
+
+  if (!botId) {
+    return res.status(400).json({ error: "botId is required." });
   }
 
   try {
-    const instance = whatsappInstances.get(assistantId);
+    const instance = whatsappInstances.get(botId);
 
     if (instance) {
+
+      try {
+        // Try to delete from database
+        const client = await pool.connect();
+        const queryResult = await client.query(
+          "DELETE FROM auth_data WHERE session_key LIKE $1",
+          [`%${botId}%`]
+        );
+        client.release();
+        console.log("Deleted session from DB", queryResult.rowCount);
+      } catch (dbError) {
+        console.error("Error deleting from database:", dbError);
+        // Don't let database errors stop the process - we've already removed from memory
+      }
+
       await instance.logout("Logging Out!");
       instance.end(new Error("Logging Out!"));
+      whatsappInstances.delete(botId);
+      deleteAfterLogout(botId);
 
       return res.sendStatus(200);
     } else {
       return res
         .status(500)
-        .send(`Whatsapp instance not found with sessionId: ${req}`);
+        .send(`Whatsapp instance not found with sessionId: ${botId}`);
     }
   } catch (e) {
     console.log(e);
@@ -368,9 +364,11 @@ async function deleteBot(req, res) {
 
 export const whatsapp = {
   addBot,
+  deleteBot,
+  decryptWhatsAppMedia,
+  getInstanceInfo,
+  deleteAfterLogout,
   restartAllSessions,
   restartSession,
-  getInstanceInfo,
-  deleteBot,
-  imitateTyping
+  imitateTyping,
 };
